@@ -1,6 +1,12 @@
 [workspace]
 members = [
     "tmhi",
-    "util",
+    "ext_util",
     "data"
 ]
+
+[profile.dev]
+opt-level = 0
+
+[profile.release]
+opt-level = 3
