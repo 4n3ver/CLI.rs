@@ -1,18 +1,18 @@
 use reqwest::{Client, RequestBuilder, Url};
-use std::rc::Rc;
+use std::sync::Arc;
 
 use super::auth::{AuthForm, TokenData};
 
 #[derive(Clone)]
 pub struct Request {
-    host: Rc<Url>,
+    host: Arc<Url>,
     client: Client,
 }
 
 impl Request {
     pub fn new(host: Url, client: Client) -> Self {
         Self {
-            host: Rc::new(host),
+            host: Arc::new(host),
             client,
         }
     }

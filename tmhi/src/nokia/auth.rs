@@ -1,7 +1,9 @@
+use ext_util::serde::{TryParse, TryParseResult};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
-use std::{cell::RefCell, rc::Rc, time::Instant};
-use ext_util::serde::{TryParse, TryParseResult};
+use std::{sync::Arc, mem};
+use std::time::Instant;
+use tokio::sync::{RwLock, Semaphore, TryAcquireError};
 
 use super::request::Request;
 
@@ -9,37 +11,48 @@ pub struct AuthClient {
     request: Request,
     username: String,
     password: String,
-    token: RefCell<Token>,
+    token: Arc<RwLock<Token>>,
+    login_permit: Arc<Semaphore>,
 }
+
 impl AuthClient {
     pub fn new(request: &Request, username: &str, password: &str) -> Self {
         AuthClient {
             request: request.to_owned(),
             username: username.to_owned(),
             password: password.to_owned(),
-            token: RefCell::new(Token::expired()),
+            token: Arc::new(RwLock::new(Token::default())),
+            login_permit: Arc::new(Semaphore::new(1)),
         }
     }
 
-    pub async fn refresh(&self) -> Result<Rc<TokenData>, reqwest::Error> {
-        let token = if self.token.borrow().is_expired() {
-            log::info!("Refreshing expired token...");
-            self.login().await?
-        } else {
-            self.token.borrow().data()
-        };
-
-        Ok(token)
+    pub async fn refresh(&self) -> Result<Arc<TokenData>, reqwest::Error> {
+        match { self.token.read().await.data() } {
+            Some(token_data) => Ok(token_data),
+            None => self.login().await,
+        }
     }
 
-    pub async fn login(&self) -> Result<Rc<TokenData>, reqwest::Error> {
-        let token = self.get_token().await?;
+    pub async fn login(&self) -> Result<Arc<TokenData>, reqwest::Error> {
+        match self.login_permit.try_acquire() {
+            Ok(_) => {
+                let mut token = self.token.write().await;
 
-        self.token.replace(token);
+                *token = self.get_token().await?;
 
-        log::info!("Logged in until {:?}!", &self.token.borrow().expiration);
+                log::info!(
+                    "Valid for {:?}secs!",
+                    token.expiration.duration_since(Instant::now())
+                );
 
-        Ok(self.token.borrow().data())
+                Ok(token.unwrapped_data())
+            }
+            Err(TryAcquireError::NoPermits) => {
+                mem::drop(self.login_permit.acquire().await);
+                Ok(self.token.read().await.unwrapped_data())
+            }
+            _ => unreachable!("`login_permit` should not be closed!"),
+        }
     }
 
     async fn get_token(&self) -> Result<Token, reqwest::Error> {
@@ -48,8 +61,6 @@ impl AuthClient {
         let token_data = self.get_token_data(&form).await?;
         let token_expiration = self.get_token_expiration(&token_data).await?;
         let token = Token::new(token_data, token_expiration);
-
-        debug_assert!(!&token.is_expired());
 
         Ok(token)
     }
@@ -84,37 +95,40 @@ impl AuthClient {
     }
 }
 
+#[derive(Debug)]
 struct Token {
-    data: Option<Rc<TokenData>>,
+    data: Option<Arc<TokenData>>,
     expiration: Instant,
 }
 impl Token {
-    pub fn new(data: TokenData, expiration: TokenExpiration) -> Self {
+    fn new(data: TokenData, expiration: TokenExpiration) -> Self {
         Token {
-            data: Some(Rc::new(data)),
+            data: Some(Arc::new(data)),
             expiration: expiration.expiration,
         }
     }
 
-    pub fn expired() -> Self {
+    fn expired() -> Self {
         Token {
             data: None,
             expiration: Instant::now(),
         }
     }
 
-    pub fn data(&self) -> Rc<TokenData> {
+    fn data(&self) -> Option<Arc<TokenData>> {
         match &self.data {
-            Some(data) => Rc::clone(data),
-            None => panic!("called `Token::data()` on a Expired value"),
+            Some(data) if self.expiration > Instant::now() => Some(Arc::clone(data)),
+            _ => None,
         }
     }
 
-    pub fn is_expired(&self) -> bool {
-        match self.data {
-            None => true,
-            _ => self.expiration < Instant::now(),
-        }
+    fn unwrapped_data(&self) -> Arc<TokenData> {
+        self.data().expect("called `Token::unwrapped_data()` on an expired `Token`")
+    }
+}
+impl Default for Token {
+    fn default() -> Self {
+        Self::expired()
     }
 }
 

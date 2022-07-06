@@ -21,16 +21,20 @@ impl Client {
     }
 
     pub async fn radio_status(&self) -> Result<RadioStatus, reqwest::Error> {
-        let response = self.request.radio_status().send().await?;
-        let body = response.json().await?;
+        let body = self.request.radio_status().send().await?.json().await?;
 
         Ok(body)
     }
 
     pub async fn reboot(&self) -> Result<String, reqwest::Error> {
         let token_data = self.auth.refresh().await?;
-        let response = self.request.reboot(&token_data).send().await?;
-        let body = response.text().await?;
+        let body = self
+            .request
+            .reboot(&token_data)
+            .send()
+            .await?
+            .text()
+            .await?;
 
         Ok(body)
     }
